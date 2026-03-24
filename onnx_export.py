@@ -80,6 +80,6 @@ if __name__ == "__main__":
 
     # Build TRT engine from ONNX
     if not os.path.exists(trt_path):
-        build_engine(onnx_path, trt_path, precision=["fp16"])
+        build_engine(onnx_path, trt_path, precision=[])
     else:
         print(f"TRT engine already exists: {trt_path}")
