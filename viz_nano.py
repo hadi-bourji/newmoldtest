@@ -302,7 +302,7 @@ def main():
     # ---- Configuration -------------------------------------------------------- #
     IMAGE_DIR  = "data/images/val"
     LABEL_DIR  = "data/labels/val"
-    CHECKPOINT = "model_checkpoints/yolox_m_uaFalse_transformsTrue_dn(train.txt)_nc8_ep400_bs128_lr1e-04_wd5e-04_03-09_13.pth"
+    CHECKPOINT = "yolox_m_uaFalse_transformsTrue_dn(train.txt)_nc8_ep400_bs128_lr1e-04_wd5e-04_03-09_13.pth"
     ONNX_PATH  = "onnx/yolox_m_nano.onnx"     # exported with decode_in_inference=False
     TRT_PATH   = "onnx/yolox_m_nano.trt"       # built from the no-decode ONNX
     # --------------------------------------------------------------------------- #

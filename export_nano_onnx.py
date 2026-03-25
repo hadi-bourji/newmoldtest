@@ -80,7 +80,7 @@ def build_engine(onnx_path: str, engine_path: str, precision=[]) -> trt.ICudaEng
 
 if __name__ == "__main__":
     num_classes = 8
-    weights = "model_checkpoints/yolox_m_uaFalse_transformsTrue_dn(train.txt)_nc8_ep400_bs128_lr1e-04_wd5e-04_03-09_13.pth"
+    weights = "yolox_m_uaFalse_transformsTrue_dn(train.txt)_nc8_ep400_bs128_lr1e-04_wd5e-04_03-09_13.pth"
     onnx_path = "onnx/yolox_m_nano.onnx"
     trt_path  = "onnx/yolox_m_nano.trt"
 
