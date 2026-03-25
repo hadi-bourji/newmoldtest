@@ -113,6 +113,6 @@ if __name__ == "__main__":
     else:
         print("  ✅ ONNX matches PyTorch closely.")
 
-    # Build TRT engine — FP32 for Nano compatibility
+    # Build TRT engine — FP16 for Nano (Tegra X1 has native FP16 at ~2x throughput)
     # ⚠️  TRT engines are GPU-specific. Run this ON the target device!
-    build_engine(onnx_path, trt_path, precision=[])
+    build_engine(onnx_path, trt_path, precision=["fp16"])
