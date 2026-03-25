@@ -11,6 +11,7 @@ Usage:
 """
 import torch
 import os
+import numpy as np
 import tensorrt as trt
 from yolox.model import create_yolox_m
 from yolox.handle_weights import load_pretrained_weights
@@ -33,14 +34,10 @@ def onnx_export(model, output_path):
 
 
 def build_engine(onnx_path: str, engine_path: str, precision=[]) -> trt.ICudaEngine:
-    """Build (or load) a TensorRT engine from an ONNX model.
+    """Build a TensorRT engine from an ONNX model.
     Default precision is FP32 (empty list) for Nano compatibility.
+    Always rebuilds — TRT engines are GPU-specific and stale files cause silent failures.
     """
-    if os.path.exists(engine_path):
-        print(f"Loading existing TRT engine: {engine_path}")
-        with open(engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as rt:
-            return rt.deserialize_cuda_engine(f.read())
-
     logger = TRT_LOGGER
     builder = trt.Builder(logger)
     network_flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
@@ -91,13 +88,31 @@ if __name__ == "__main__":
     # KEY DIFFERENCE: disable decode so ONNX/TRT graph is simple
     model.head.decode_in_inference = False
 
-    if not os.path.exists(onnx_path):
-        onnx_export(model, "onnx/yolox_m_nano")
-    else:
-        print(f"ONNX already exists: {onnx_path}")
+    # Always delete old files to prevent stale exports
+    for path in [onnx_path, trt_path]:
+        if os.path.exists(path):
+            print(f"Deleting old: {path}")
+            os.remove(path)
 
-    # Build TRT engine — FP32 by default for Nano
-    if not os.path.exists(trt_path):
-        build_engine(onnx_path, trt_path, precision=[])
+    onnx_export(model, "onnx/yolox_m_nano")
+
+    # Verify ONNX matches PyTorch raw output
+    print("\nVerifying ONNX export...")
+    import onnxruntime as ort
+    dummy = torch.randn(1, 3, 640, 640)
+    with torch.no_grad():
+        pt_raw = model(dummy).numpy()
+    sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+    onnx_raw = sess.run(None, {"input": dummy.numpy()})[0]
+    max_diff = np.abs(pt_raw - onnx_raw).max()
+    print(f"  Max |PyTorch - ONNX| = {max_diff:.6f}")
+    print(f"  PyTorch raw xy: [{pt_raw[...,0:2].min():.3f}, {pt_raw[...,0:2].max():.3f}]")
+    print(f"  ONNX    raw xy: [{onnx_raw[...,0:2].min():.3f}, {onnx_raw[...,0:2].max():.3f}]")
+    if max_diff > 0.01:
+        print("  ⚠️  Large diff — ONNX export may not match PyTorch!")
     else:
-        print(f"TRT engine already exists: {trt_path}")
+        print("  ✅ ONNX matches PyTorch closely.")
+
+    # Build TRT engine — FP32 for Nano compatibility
+    # ⚠️  TRT engines are GPU-specific. Run this ON the target device!
+    build_engine(onnx_path, trt_path, precision=[])

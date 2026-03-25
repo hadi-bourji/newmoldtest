@@ -14,7 +14,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import einops
-import onnxruntime as ort
 from yolox.model import create_yolox_m
 from yolox.handle_weights import load_pretrained_weights
 from data_utils.metrics import post_process_img
@@ -341,33 +340,21 @@ def main():
 
     run_evaluation(image_paths, LABEL_DIR, pth_output_dir, pth_infer, "PyTorch (.pth)", device=device)
 
+    # --- Capture raw PyTorch output (decode=False) for TRT comparison ------- #
+    model.head.decode_in_inference = False
+    diag_frame = cv2.imread(image_paths[0])
+    diag_img, _, _ = process_frame(diag_frame, device=device, output_size=INPUT_SIZE)
+    with torch.no_grad():
+        pth_raw = model(diag_img)  # raw: (1, 8400, 13), no grid decode
+    print(f"\n  [Diagnostic] Saved PyTorch raw output for TRT comparison (shape {pth_raw.shape})")
+
     # Free PyTorch model memory
     del model
     if device == "cuda":
         torch.cuda.empty_cache()
 
-    # ===== 2) ONNX Runtime backend =========================================== #
-    print(f"\n\n{'#'*60}")
-    print(f"  ONNX Runtime Backend  —  {ONNX_PATH}")
-    print(f"{'#'*60}")
-    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if device == "cuda" else ["CPUExecutionProvider"]
-    sess_opts = ort.SessionOptions()
-    sess_opts.intra_op_num_threads = 1
-    sess_opts.inter_op_num_threads = 1
-    ort_session = ort.InferenceSession(ONNX_PATH, sess_options=sess_opts, providers=providers)
-    ort_input_name = ort_session.get_inputs()[0].name
-
-    onnx_output_dir = f"Test_Visualize_ONNX_{os.path.splitext(os.path.basename(ONNX_PATH))[0]}"
-
-    def onnx_infer(img_tensor):
-        np_input = img_tensor.cpu().numpy()
-        ort_out = ort_session.run(None, {ort_input_name: np_input})
-        raw = torch.from_numpy(ort_out[0]).to(img_tensor.device)
-        return decode_yolox_output(raw)  # decode in Python
-
-    # run_evaluation(image_paths, LABEL_DIR, onnx_output_dir, onnx_infer, "ONNX Runtime", device=device)
-
-    # ===== 3) TensorRT backend =============================================== #
+    # ===== 2) TensorRT backend =============================================== #
+    # (ONNX Runtime skipped — no CUDA EP on Jetson ARM, CPU is too slow)
     if os.path.exists(TRT_PATH):
         import tensorrt as trt
         print(f"\n\n{'#'*60}")
@@ -392,40 +379,42 @@ def main():
 
         trt_stream = torch.cuda.Stream()
 
-        # def trt_infer(img_tensor):
-        #     trt_input_buf.copy_(img_tensor)
-        #     trt_context.execute_async_v3(stream_handle=trt_stream.cuda_stream)
-        #     trt_stream.synchronize()
-        #     return decode_yolox_output(trt_output_buf.clone())  # decode in Python
-        
-        # ---- Diagnostic: check first image to detect double-decode ---------- #
-        print("\n--- TRT DIAGNOSTIC (first image) ---")
-        diag_frame = cv2.imread(image_paths[0])
-        diag_img, _, _ = process_frame(diag_frame, device=device, output_size=INPUT_SIZE)
-        with torch.cuda.stream(trt_stream):
-            trt_input_buf.copy_(diag_img, non_blocking=True)
+        # ---- Diagnostic: compare PyTorch raw vs TRT raw on first image ----- #
+        print("\n--- TRT vs PyTorch DIAGNOSTIC (first image) ---")
+        torch.cuda.current_stream().synchronize()  # ensure diag_img is ready
+        trt_input_buf.copy_(diag_img)
+        torch.cuda.current_stream().synchronize()  # ensure copy done
         trt_context.execute_async_v3(stream_handle=trt_stream.cuda_stream)
         trt_stream.synchronize()
-        raw_trt = trt_output_buf.clone()
+        trt_raw = trt_output_buf.clone()
 
-        xy = raw_trt[0, :, 0:2]
-        wh = raw_trt[0, :, 2:4]
-        obj = raw_trt[0, :, 4]
-        print(f"  RAW TRT output (before Python decode):")
-        print(f"    xy  range: [{xy.min().item():.2f}, {xy.max().item():.2f}]")
-        print(f"    wh  range: [{wh.min().item():.2f}, {wh.max().item():.2f}]")
-        print(f"    obj range: [{obj.min().item():.4f}, {obj.max().item():.4f}]")
-        if xy.max().item() > 100:
-            print(f"  ⚠️  xy max={xy.max().item():.1f} >> 5 — DECODE IS ALREADY IN THE GRAPH!")
-            print(f"  ⚠️  Python decode will DOUBLE-DECODE → garbage boxes.")
-            print(f"  ⚠️  FIX: Delete {ONNX_PATH} and {TRT_PATH}, then re-run nano_onnx_export.py")
+        # Compare raw outputs (both should be undecoded)
+        diff = (pth_raw - trt_raw).abs()
+        print(f"  PyTorch raw shape: {pth_raw.shape}")
+        print(f"  TRT     raw shape: {trt_raw.shape}")
+        print(f"  Max |PT - TRT| overall:   {diff.max().item():.6f}")
+        print(f"  Max |PT - TRT| xy (0:2):  {diff[..., 0:2].max().item():.6f}")
+        print(f"  Max |PT - TRT| wh (2:4):  {diff[..., 2:4].max().item():.6f}")
+        print(f"  Max |PT - TRT| obj (4):   {diff[..., 4].max().item():.6f}")
+        print(f"  Max |PT - TRT| cls (5:):  {diff[..., 5:].max().item():.6f}")
+        # Show anchor with highest PyTorch confidence for sanity check
+        top_obj_idx = pth_raw[0, :, 4].argmax().item()
+        print(f"\n  Anchor with highest PyTorch obj (idx={top_obj_idx}):")
+        print(f"    PyTorch: {pth_raw[0, top_obj_idx, :6].tolist()}")
+        print(f"    TRT:     {trt_raw[0, top_obj_idx, :6].tolist()}")
+        if diff.max().item() > 1.0:
+            print(f"\n  ⚠️  LARGE DIFFERENCE — TRT is NOT matching PyTorch!")
+            print(f"  ⚠️  Likely cause: stale ONNX/TRT from different weights or old export.")
+            print(f"  ⚠️  FIX: Delete {ONNX_PATH} and {TRT_PATH}, re-run nano_onnx_export.py")
+        elif diff.max().item() > 0.01:
+            print(f"\n  ⚠️  Moderate difference — possible FP precision issue.")
         else:
-            print(f"  ✅ xy values are small — output is raw (undecoded). Python decode should work.")
+            print(f"\n  ✅ TRT raw output matches PyTorch closely.")
         print("--- END DIAGNOSTIC ---\n")
 
         def trt_infer(img_tensor):
-            with torch.cuda.stream(trt_stream):
-                trt_input_buf.copy_(img_tensor, non_blocking=True)
+            trt_input_buf.copy_(img_tensor)
+            torch.cuda.current_stream().synchronize()  # ensure copy before TRT reads
             trt_context.execute_async_v3(stream_handle=trt_stream.cuda_stream)
             trt_stream.synchronize()
             return decode_yolox_output(trt_output_buf.clone())
