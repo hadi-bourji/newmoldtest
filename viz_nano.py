@@ -398,9 +398,34 @@ def main():
         #     trt_stream.synchronize()
         #     return decode_yolox_output(trt_output_buf.clone())  # decode in Python
         
+        # ---- Diagnostic: check first image to detect double-decode ---------- #
+        print("\n--- TRT DIAGNOSTIC (first image) ---")
+        diag_frame = cv2.imread(image_paths[0])
+        diag_img, _, _ = process_frame(diag_frame, device=device, output_size=INPUT_SIZE)
+        with torch.cuda.stream(trt_stream):
+            trt_input_buf.copy_(diag_img, non_blocking=True)
+        trt_context.execute_async_v3(stream_handle=trt_stream.cuda_stream)
+        trt_stream.synchronize()
+        raw_trt = trt_output_buf.clone()
+
+        xy = raw_trt[0, :, 0:2]
+        wh = raw_trt[0, :, 2:4]
+        obj = raw_trt[0, :, 4]
+        print(f"  RAW TRT output (before Python decode):")
+        print(f"    xy  range: [{xy.min().item():.2f}, {xy.max().item():.2f}]")
+        print(f"    wh  range: [{wh.min().item():.2f}, {wh.max().item():.2f}]")
+        print(f"    obj range: [{obj.min().item():.4f}, {obj.max().item():.4f}]")
+        if xy.max().item() > 100:
+            print(f"  ⚠️  xy max={xy.max().item():.1f} >> 5 — DECODE IS ALREADY IN THE GRAPH!")
+            print(f"  ⚠️  Python decode will DOUBLE-DECODE → garbage boxes.")
+            print(f"  ⚠️  FIX: Delete {ONNX_PATH} and {TRT_PATH}, then re-run nano_onnx_export.py")
+        else:
+            print(f"  ✅ xy values are small — output is raw (undecoded). Python decode should work.")
+        print("--- END DIAGNOSTIC ---\n")
+
         def trt_infer(img_tensor):
             with torch.cuda.stream(trt_stream):
-                trt_input_buf.copy_(img_tensor, non_blocking=True)  # now on trt_stream
+                trt_input_buf.copy_(img_tensor, non_blocking=True)
             trt_context.execute_async_v3(stream_handle=trt_stream.cuda_stream)
             trt_stream.synchronize()
             return decode_yolox_output(trt_output_buf.clone())
