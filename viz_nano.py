@@ -365,7 +365,7 @@ def main():
         raw = torch.from_numpy(ort_out[0]).to(img_tensor.device)
         return decode_yolox_output(raw)  # decode in Python
 
-    run_evaluation(image_paths, LABEL_DIR, onnx_output_dir, onnx_infer, "ONNX Runtime", device=device)
+    # run_evaluation(image_paths, LABEL_DIR, onnx_output_dir, onnx_infer, "ONNX Runtime", device=device)
 
     # ===== 3) TensorRT backend =============================================== #
     if os.path.exists(TRT_PATH):
@@ -392,11 +392,18 @@ def main():
 
         trt_stream = torch.cuda.Stream()
 
+        # def trt_infer(img_tensor):
+        #     trt_input_buf.copy_(img_tensor)
+        #     trt_context.execute_async_v3(stream_handle=trt_stream.cuda_stream)
+        #     trt_stream.synchronize()
+        #     return decode_yolox_output(trt_output_buf.clone())  # decode in Python
+        
         def trt_infer(img_tensor):
-            trt_input_buf.copy_(img_tensor)
+            with torch.cuda.stream(trt_stream):
+                trt_input_buf.copy_(img_tensor, non_blocking=True)  # now on trt_stream
             trt_context.execute_async_v3(stream_handle=trt_stream.cuda_stream)
             trt_stream.synchronize()
-            return decode_yolox_output(trt_output_buf.clone())  # decode in Python
+            return decode_yolox_output(trt_output_buf.clone())
 
         trt_output_dir = f"Test_Visualize_TRT_{os.path.splitext(os.path.basename(TRT_PATH))[0]}"
         run_evaluation(image_paths, LABEL_DIR, trt_output_dir, trt_infer, "TensorRT", device=device)
